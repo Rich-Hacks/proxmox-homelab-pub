@@ -6,9 +6,9 @@
 |---|---|
 | **Maintainer** | `<MAINTAINER>` |
 | **Repository** | `<REPO-URL>` |
-| **Last updated** | 16 May 2026 |
-| **Document version** | 1.0 |
-| **Proxmox VE version** | 9.1.9 (`pve-manager/9.1.9/ee7bad0a3d1546c9`) |
+| **Last updated** | 10 June 2026 |
+| **Document version** | 1.1 |
+| **Proxmox VE version** | 9.1.11 |
 | **Kernel** | 7.0.2-2-pve |
 | **Cluster name** | `<CLUSTER-NAME>` |
 
@@ -68,6 +68,8 @@ Both nodes are **HPE ProLiant MicroServer Gen10** units (AMD platform — not Ge
 
 The AMD APU is significant for the Immich container — the integrated Radeon GPU is passed through to CT 112 for hardware-accelerated photo/video transcoding (`/dev/dri/card1`, `/dev/dri/renderD128`).
 
+**RAM headroom note (June 2026):** with the Euro-Office container added, committed guest RAM on node 1 is ~13 GB of 16 GB. On ZFS hosts this warrants capping the ARC (`zfs_arc_max`) to avoid memory pressure — see the operational runbook.
+
 ### Cluster layout
 
 ```mermaid
@@ -86,6 +88,7 @@ flowchart TB
         PVEHW["🖥️ HP MicroServer Gen10<br/>AMD Opteron X3421 · 16 GB RAM<br/>UEFI boot"]:::hw
         TANK[("💾 ZFS pool: tank<br/>~41 TB · 21.72% used")]:::storage
         VM111["VM 111 — mweelrea<br/>Nextcloud"]:::vm
+        CT141["CT 141 — eurooffice<br/>Euro-Office DS"]:::ct
         CT101["CT 101 — oriel<br/>NAS / Samba"]:::ct
         CT102["CT 102 — slemish<br/>Plex"]:::ct
         CT103["CT 103 — iveagh<br/>Transmission"]:::ct
@@ -134,6 +137,7 @@ flowchart TB
 | `local-lvm` | LVM-thin | both | ~800 GB (pve) / 140 GB (pve2) | <10% | Local OS-disk VM/CT disks |
 | `local` / `iso` | Directory | both | — | — | ISO images and CT templates |
 | `zfs_backup` | Directory | pve2 | (on tank2) | — | vzdump backup target |
+| `node1_backup` | Directory | pve | (on tank) | — | vzdump target for node-1 application guests (added June 2026) |
 
 **Note:** `vmstorage` and `vmstoragelimited` are not separate physical pools — they are alternative Proxmox storage IDs that point at the same underlying ZFS pool (`tank` on pve, `tank2` on pve2) with different `sparse` and quota behaviour. This pattern lets you assign different policies to different VMs/CTs without managing separate pools.
 
@@ -151,6 +155,7 @@ flowchart TB
 - **vzdump** is configured to write to the `zfs_backup` directory storage on pve2, which sits on the `tank2` ZFS pool at `/tank2/backups/dump`.
 - This was migrated from `/tank/backups` during the PVE 9 upgrade preparation (root filesystem was running low on space — see §8).
 - Backups retain all snapshots (`prune-backups keep-all=1`) and are not currently age-pruned. This is a known item to revisit when `tank2` utilisation grows.
+- **June 2026:** the Nextcloud VM and the new Euro-Office container are moving from manual backups to a **scheduled weekly vzdump job** (snapshot mode — the VM's guest agent provides fsfreeze consistency; retention `keep-last=4,keep-weekly=4,keep-monthly=3` instead of keep-all). Note the target (`node1_backup`) sits on the same node as the guests — cross-node or off-site copies remain the gap to close.
 
 ---
 
@@ -160,7 +165,7 @@ flowchart TB
 
 | VMID | Name | Node | Purpose | vCPU | RAM | Disk(s) | BIOS | Notes |
 |---|---|---|---|---|---|---|---|---|
-| 111 | mweelrea | pve | Nextcloud | 2 | 4 GB | 40 GB + 828 MB on local-lvm | SeaBIOS, q35 | Community Scripts appliance, qemu-guest-agent enabled |
+| 111 | mweelrea | pve | Nextcloud | 2 | 4 GB | 40 GB + 828 MB on local-lvm | SeaBIOS, q35 | Community Scripts appliance (TurnKey 18.1 guest), qemu-guest-agent enabled; also hosts the TLS reverse proxy fronting CT 141 |
 | 113 | breifne | pve2 | Home Assistant OS 17.2 | 2 | 4 GB | 32 GB on vmstorage2 | OVMF (UEFI) | HA Core 2026.4.1 |
 
 ### LXC containers
@@ -175,11 +180,13 @@ flowchart TB
 | 108 | slievemore | pve2 | Backup server | Debian | 2 | 4 GB | vmstorage2 100 GB |
 | 109 | knockbrinnea | pve2 | Docker host + Mealie | Ubuntu | 2 | 1 GB | vmstorage2 50 GB |
 | 112 | immich | pve2 | Self-hosted photos (Immich) | Debian | 4 | 4 GB | tank2 600 GB |
+| 141 | eurooffice | pve | Euro-Office DocumentServer 9.3.1 (collaborative office editing for Nextcloud) | Debian 12 | 4 | 4 GB | vmstorage 15 GB |
 
 All LXC containers are **unprivileged** (UID-remapped). Specific feature flags are enabled per-container as needed:
 
 - **CT 109** (Docker): `features: keyctl=1,nesting=1` — required for Docker-in-LXC.
 - **CT 112** (Immich): `features: keyctl=1,nesting=1,fuse=1` plus GPU passthrough (`dev0: /dev/dri/card1`, `dev1: /dev/dri/renderD128`, `lxc.cgroup2.devices.allow: c 10:200 rwm`) for hardware-accelerated transcoding.
+- **CT 141** (Euro-Office): `features: nesting=1`.
 
 ### Container 101 (oriel / NAS) mount points
 
@@ -200,6 +207,7 @@ Defined via `startup: order=N,up=N,down=N` in each container/VM config:
 | 2 | CT 102 (Plex) | Needs `/mnt/media` from the NAS once available |
 | 3 | CT 103 (Transmission) | Needs `/mnt/downloads` and `/mnt/media` |
 | 4 | VM 111 (Nextcloud) | Application layer |
+| — *(default)* | CT 141 (Euro-Office DS) | Recommended `order=5` — the editor depends on Nextcloud being up |
 
 ---
 
@@ -228,7 +236,7 @@ flowchart LR
       DNS["DNS / ad-block<br/>(2× Pi-hole)"]:::svc
       NAS["NAS / Samba"]:::svc
       MEDIA["Media stack"]:::svc
-      CLOUD["Personal cloud"]:::svc
+      CLOUD["Personal cloud +<br/>office editing"]:::svc
       OTHER["Other services"]:::svc
     end
 
@@ -262,6 +270,7 @@ flowchart LR
 | `<NAS-IP>` | CT 101 oriel (Samba) | Static |
 | `<PIHOLE-PRI>` | CT 106 commedagh (DNS) | Static |
 | `<PIHOLE-SEC>` | CT 104 donard (DNS) | Static |
+| `<EUROOFFICE-IP>` | CT 141 eurooffice (Euro-Office DS) | Static |
 | DHCP | CT 112 immich, VM 111 mweelrea | Reserved leases |
 
 All hosts sit on a single flat `/24` subnet. Future improvement: VLAN segmentation for management vs services vs IoT.
@@ -446,6 +455,10 @@ rm /var/lock/lxc/pve-config-<CTID>.lock        # for CTs
 ---
 
 ## 8. Change log & known issues resolved
+
+### June 2026 — Euro-Office DocumentServer deployment (CT 141)
+
+Collaborative document editing added to the personal cloud via Euro-Office DocumentServer 9.3.1 (the community fork of ONLYOFFICE DS) in a new unprivileged Debian 12 LXC on node 1. Apache on the Nextcloud VM became a name-based TLS-terminating reverse proxy for the document-server hostname on the **existing 443 port-forward** — no new exposed ports. The new hostname's certificate uses ACME **DNS-01** (provider API token), coexisting with the appliance's existing HTTP-01 renewal. Two packaging defects were found and worked around: the docservice binary ignores `local.json` overlays (`default.json` is the effective config — all JWT and `secure_link` secrets must be set there, and re-applied after every package upgrade), and the installer leaves the nginx `secure_link` secret mismatched with the application's signing secret, causing 403s on conversion checks. An IPv6-enabled-but-unrouted guest also broke ACME and app-store fetches, fixed by preferring IPv4 in `/etc/gai.conf`. Full procedure and verification tooling live in the companion `eurooffice-nextcloud-PUBLIC.md` runbook.
 
 ### May 2026 — Upgrade from PVE 8.4 to PVE 9.1.9
 
@@ -661,4 +674,4 @@ echo "Backup written to $BACKUP_DIR"
 
 ---
 
-*End of document. Maintain via PR / commit; tag releases by date and PVE point release.*
+*End of document (v1.1, June 2026). Maintain via PR / commit; tag releases by date and PVE point release.*
