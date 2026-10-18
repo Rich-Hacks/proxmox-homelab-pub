@@ -6,8 +6,8 @@
 | | |
 |---|---|
 | **Maintainer** | Richard Carragher (RC COMMS) |
-| **Last updated** | 11 October 2026 |
-| **Document version** | 3.0 (supersedes v1.2 / v2.x) |
+| **Last updated** | 18 October 2026 |
+| **Document version** | 3.2 (supersedes v1.2 / v2.x / v3.0–3.1) |
 | **Proxmox VE version** | 9.2 on all nodes · ZFS 2.4 |
 | **Cluster** | Three nodes |
 | **Classification** | Public |
@@ -27,6 +27,8 @@ Guest IDs and hostnames are real (they carry no sensitive information). Hostname
 
 ## Related documents
 
+- **`ARCHITECTURE-PUBLIC.md`** — compact topology and inventory reference.
+- **`wazuh-PUBLIC.md`** — Wazuh SIEM: agents, control-plane FIM, auditd, email relay, SCA triage.
 - **`nextcloud-PUBLIC.md`** — Nextcloud on Proxmox LXCs: HA build, tunnel, migration from a VM appliance.
 - **`eurooffice-nextcloud-PUBLIC.md`** — Euro-Office DocumentServer integration.
 - **`self-hosted-private-cloud-runbook.md`** — generic family private-cloud reference build.
@@ -50,13 +52,13 @@ Guest IDs and hostnames are real (they carry no sensitive information). Hostname
 
 ## 1. Overview
 
-A three-node Proxmox VE 9 cluster runs around 30 LXC containers and two KVM VMs for a family homelab. Services include file sharing (SMB/NFS), a private cloud (Nextcloud + Euro-Office), photo backup (Immich), Plex with GPU transcode, Usenet automation, DNS ad-blocking (Pi-hole), Home Assistant, a password manager (Vaultwarden), ebooks and audiobooks, Paperless, Gitea, and a hybrid local-LLM stack. A Raspberry Pi outside the cluster runs Uptime Kuma with LTE SMS alerting.
+A three-node Proxmox VE 9 cluster runs around 30 LXC containers and three KVM VMs for a family homelab. Services include file sharing (SMB/NFS), a private cloud (Nextcloud + Euro-Office), photo backup (Immich), Plex with GPU transcode, Usenet automation, DNS ad-blocking (Pi-hole), Home Assistant, a password manager (Vaultwarden), ebooks and audiobooks, Paperless, Gitea, a hybrid local-LLM stack, and a **Wazuh SIEM** watching almost every host. A Raspberry Pi outside the cluster runs Uptime Kuma with LTE SMS alerting.
 
-**Design principles:** publish via **Cloudflare Tunnel** (no router port-forwards); administer via **Tailscale + LAN** only; **unprivileged LXCs**, one service per container; **ZFS** everywhere; HA only where it earns its keep; backups in three layers (local snapshots, cross-node replicas, encrypted off-site).
+**Design principles:** publish via **Cloudflare Tunnel** (no router port-forwards); administer via **Tailscale + LAN** only; **unprivileged LXCs**, one service per container; **ZFS** everywhere; HA only where it earns its keep; backups in three layers (local snapshots, cross-node replicas, encrypted off-site); monitoring and alerting **outside the cluster's failure domain**.
 
 ### Why LXC over VMs?
 
-Containers share the host kernel: lighter, faster, and replicable as ZFS datasets. VMs are kept only where a separate kernel or OS image is required — Home Assistant OS and Windows 11. The last appliance VM (a TurnKey Nextcloud) was replaced by containers in October 2026.
+Containers share the host kernel: lighter, faster, and replicable as ZFS datasets. VMs are kept only where a separate kernel or OS image is required — Home Assistant OS, Windows 11, and the Wazuh all-in-one (its central components support Ubuntu/RHEL, and OpenSearch needs kernel tuning an unprivileged container cannot set). The last appliance VM (a TurnKey Nextcloud) was replaced by containers in October 2026.
 
 ### Node roles
 
@@ -64,7 +66,7 @@ Containers share the host kernel: lighter, faster, and replicable as ZFS dataset
 |---|---|---|
 | `pve` | HPE MicroServer Gen10, 32 GB, 4×16 TB RAIDZ1 | Bulk storage + NFS exporter; NAS, media acquisition, Pi-hole primary, ebook/audiobook stacks |
 | `pve2` | HPE MicroServer Gen10, 32 GB, 4×4 TB RAIDZ1 | Primary for HA workloads (Nextcloud, Vaultwarden, Home Assistant), Immich, Pi-hole secondary |
-| `pve3` | Minisforum MS-02 Ultra, Core Ultra 9 285HX, 64 GB, Arc A310, 1 TB NVMe | Compute/GPU: Plex, LLM services, Immich ML, Paperless, Gitea, Windows 11; HA failover target |
+| `pve3` | Minisforum MS-02 Ultra, Core Ultra 9 285HX, 64 GB, Arc A310, 1 TB NVMe | Compute/GPU: Plex, LLM services, Immich ML, Paperless, Gitea, Windows 11, Wazuh SIEM; HA failover target |
 
 ---
 
@@ -74,7 +76,7 @@ Containers share the host kernel: lighter, faster, and replicable as ZFS dataset
 
 - **Gen10 MicroServers** (AMD Opteron X3421, 4 cores): no iLO — a failed boot needs a physical console. The single PCIe slot holds a 10 GbE NIC. RAM upgraded 16 → 32 GB.
 - **pve3**: the integrated GPU is passed through to the Windows VM; the **Intel Arc A310** serves Plex transcoding and Immich's OpenVINO machine learning (shared render node). Its data pool is a **single NVMe** — a mirror is planned.
-- **Monitoring Pi** (not a cluster member): Uptime Kuma + an LTE HAT for SMS alerts, deliberately outside the cluster's failure domain.
+- **Monitoring Pi** (not a cluster member): Uptime Kuma + a Pimoroni Clipper HAT Mini (A7683E LTE) for SMS alerts, deliberately outside the cluster's failure domain. Take the HAT's power-key and reset pins from the **vendor schematic** — a guide-derived pin left the modem dead after every soft reboot (see §9). Patched by `unattended-upgrades`; administered via Raspberry Pi Connect with SSH disabled.
 
 ### Cluster layout
 
@@ -100,8 +102,8 @@ flowchart TB
       end
       subgraph N3["pve3"]
         S3[("tank · 1 TB NVMe")]:::st
-        G3["Plex (A310) · LLM chat · AnythingLLM<br/>Immich ML · Paperless · Gitea<br/>ACME · fitness app · tunnel #2"]:::ct
-        V3["Windows 11 (VM, iGPU)"]:::vm
+        G3["Plex (A310) · LLM chat · AnythingLLM<br/>Immich ML · Paperless · Gitea<br/>ACME · tunnel #2"]:::ct
+        V3["Windows 11 (VM, iGPU)<br/>Wazuh SIEM (VM)"]:::vm
       end
       N1 <-. "corosync: mgmt + 10 GbE links" .-> N2
       N2 <-. "replication (Nextcloud)" .-> N3
@@ -118,8 +120,8 @@ flowchart TB
 - **No shared block storage.** Every node has a local ZFS pool named `tank`; one storage ID spans all three nodes so replicated guests have a target everywhere. File sharing to pve3 is NFS over the storage fabric.
 - **Three real votes.** Any single node can fail without losing quorum (a two-node QDevice was retired when the third node joined).
 - **Targeted HA.** ZFS replication (`pvesr`) + Proxmox HA for Vaultwarden, Home Assistant and the Nextcloud stack. GPU- and bind-mount-bound guests are pinned and restored from backup instead.
-- **Unprivileged by default.** One legacy privileged container remains and is a retirement candidate.
-- **Tunnel for publishing, mesh VPN for administration.** No inbound router ports; per-guest firewalls where a guest exposes a database or internal services.
+- **Unprivileged everywhere.** An October 2026 audit confirmed every container is unprivileged.
+- **Tunnel for publishing, mesh VPN for administration.** No inbound router ports; per-guest firewalls where a guest exposes a database or internal services. The one documented exception is the out-of-band monitoring Pi (§7).
 
 ---
 
@@ -130,7 +132,7 @@ flowchart TB
 | Node | Layout | Raw | Free |
 |---|---|---|---|
 | pve | 4×16 TB RAIDZ1 | 58 T | ~25 T |
-| pve2 | 4×4 TB RAIDZ1 | 14.5 T | ~5.5 T |
+| pve2 | 4×4 TB RAIDZ1 | 14.5 T | ~5 T |
 | pve3 | single 1 TB NVMe | 0.9 T | ~0.75 T |
 
 ### Storage IDs
@@ -165,11 +167,15 @@ Nextcloud data lives on pve2 in its own dataset (`recordsize=1M`); the database 
 | **Storage replication** (`pvesr`) | Vaultwarden + Home Assistant pve2 → pve; Nextcloud app/DB pve2 → pve3 | every 5 min |
 | **sanoid** | Critical datasets: 14d/8w/6m/1y; archive and podcasts shorter | every 15 min |
 | **syncoid** | Each Gen10 node pulls the other's critical dataset into `tank/replica/` | nightly |
-| **dump-mirror** | rsync of each Gen10 node's vzdumps to the peer | weekly |
+| **dump-mirror** | rsync of every node's vzdumps to a second pool (pve3's dumps, which land on pve over NFS, are mirrored to pve2) | weekly |
 | **Logical DB dump** | `mariadb-dump --single-transaction` → zstd, 7 days local | nightly, before off-site |
 | **restic → EU storage box** | General share, Immich library, Nextcloud data + DB dumps; per-node repos, 7d/4w/6m/1y, 2 % read verification; provider-side immutable snapshots | nightly |
 
 Notes: node-scoped vzdump jobs skip guests running on another node (HA guests are listed in more than one job where it makes sense). Containers with **bind mounts** back up only their rootfs and cannot be `pct snapshot`-ed — snapshot the dataset instead. Replaceable media (~15 TB) is protected by RAIDZ and an occasional offline copy, not off-site backup.
+
+### Drive health
+
+smartd on every node runs daily short and weekly long self-tests with temperature thresholds tuned per drive class (HDD 50/58 °C — enterprise drives idle at 40–42 °C; NVMe 60/70 °C). Events and a daily heartbeat are pushed to Uptime Kuma push monitors, because the stock `-m root` mails a local mailbox nobody reads.
 
 ---
 
@@ -180,14 +186,15 @@ Notes: node-scoped vzdump jobs skip guests running on another node (HA guests ar
 | VM | Name | Node | Purpose | Notes |
 |---|---|---|---|---|
 | 113 | breifne | pve2 (HA) | Home Assistant OS | 2 vCPU, 4 GB (reduced from 8 GB — actual use ~1.5 GB), OVMF, replicated to pve |
-| 150 | winmigrate | pve3 | Windows 11 | 8 vCPU, 16 GB, OVMF + TPM 2.0, **iGPU passthrough**, guest agent (VSS-consistent backups). Clean install after a failed P2V (anti-cheat kernel driver + WDAC policies won't boot virtualised) |
+| 130 | gullion | pve3 | **Wazuh SIEM** all-in-one (manager, indexer, dashboard) | Ubuntu 24.04, 4 vCPU, 8 GB **balloon off** (OpenSearch heap), 120 G; guest firewall; see `wazuh-PUBLIC.md` |
+| 150 | winmigrate | pve3 | Windows 11 | 8 vCPU, 8 GB (balloon 4 GB; cut from 16 GB), OVMF + TPM 2.0, **iGPU passthrough**, guest agent (VSS-consistent backups). Clean install after a failed P2V (anti-cheat kernel driver + WDAC policies won't boot virtualised) |
 
 ### Containers
 
 | CT | Name | Node | Service | Notes |
 |---|---|---|---|---|
 | 101 | oriel | pve | NAS / Samba | 6 bind mounts from `tank` |
-| 103 | iveagh | pve | Transmission | Privileged (legacy) — retirement candidate |
+| 103 | iveagh | pve | Transmission | Retirement candidate (superseded by the Usenet stack) |
 | 106 | commedagh | pve | Pi-hole primary | |
 | 114 | shanlieve | pve | SABnzbd | VPN egress via router policy |
 | 115 | doan | pve | Sonarr | |
@@ -196,8 +203,8 @@ Notes: node-scoped vzdump jobs skip guests running on another node (HA guests ar
 | 120 | meelbeg | pve | Calibre-Web NextGen + Shelfmark | Docker LXC, digest-pinned images |
 | 104 | donard | pve2 | Pi-hole secondary | |
 | 105 | slievemore | pve2 | Tailscale exit node + subnet router | |
-| 109 | knockbrinnea | pve2 | Mealie | Ubuntu, Docker |
-| 112 | immich | pve2 | Immich + its own tunnel connector | APU iGPU passthrough; ML on pve3 |
+| 109 | knockbrinnea | pve2 | Mealie | Ubuntu, Docker; pre-tunnel nginx/certbot and rsyslog removed from service |
+| 112 | immich | pve2 | Immich + its own tunnel connector | APU iGPU passthrough; ML on pve3; static IP; hourly read-only rsync pull of phone uploads from the NAS |
 | 117 | conavalla | pve2 | Prowlarr | |
 | 118 | beara | pve2 | Seerr | Tailscale in-CT |
 | 121 | bencrom | pve2 (HA) | Vaultwarden + tunnel connector | Behind Cloudflare Access (hardware key) |
@@ -212,7 +219,6 @@ Notes: node-scoped vzdump jobs skip guests running on another node (HA guests ar
 | 126 | carn | pve3 | Paperless-ngx | NFS storage |
 | 127 | spelga | pve3 | Gitea | NFS repositories |
 | 129 | pigeonrock | pve3 | ACME certificate issuer | |
-| 130 | gullion | pve3 | Fitness / health app | |
 | 134 | beenkeragh | pve3 | Tunnel connector #2 | Stateless, not HA, not backed up |
 
 ### GPU passthrough notes
@@ -286,12 +292,23 @@ pve exports `Media`, Paperless and Gitea directories and a backup directory to p
 | Router | No inbound forwards |
 | Public apps | Cloudflare Tunnel; Access in front of the password manager; WAF rules and login rate limiting in front of Nextcloud (no Access there — sync clients cannot pass an interstitial; Bot Fight Mode **off** for the same reason) |
 | Admin plane | Datacenter firewall: ICMP, 8006 and 22 from LAN and tailnet only, storage fabric allowed, **default DROP**; TOTP on the PVE login |
-| Guests | Per-guest firewalls (default DROP) on the Nextcloud app, its database, and the document server — each allows only named sources |
+| Out-of-band exception | The monitoring Pi is administered through Raspberry Pi Connect (account protected with MFA) so it stays reachable when the LAN or tailnet is down; its SSH daemon is disabled |
+| Guests | Per-guest firewalls (default DROP) on the Nextcloud app, its database, the document server and the SIEM — each allows only named sources |
+| Detection | Wazuh SIEM with agents on the nodes, the Pi, the workstation and almost every container; level ≥12 alerts by email; Uptime Kuma + LTE SMS for availability |
+
+### Node hardening (from Wazuh SCA, October 2026)
+
+- **sshd** drop-in on every node: `PermitRootLogin prohibit-password`, `MaxAuthTries 4`, `LoginGraceTime 60`, client-alive 300 s × 3, `MaxStartups 10:30:60`, ETM-only MACs. Forwarding and password auth are kept — clustering and secure migration need root key SSH with forwarding, and the console is the break-glass path.
+- **auditd** with a deliberately small ruleset (identity files, human-initiated time and kernel-module changes via `auid!=unset`, network config, sshd config, cron) shipped to Wazuh. No blanket `execve` auditing — root cron jobs would flood it.
+- **File-integrity monitoring** on the control plane: realtime with diffs on node-local config, **whodata** (who/which process) on `/etc/ssh`, scheduled no-diff scans of `/etc/pve` (cluster filesystem — FUSE, contains keys).
+- Cron permissions tightened; telnet client removed.
+- CIS checks that conflict with a hypervisor (separate partitions, ufw/nftables, AIDE, password ageing for key-only root admin) are **accepted by design**; several apparent failures (shadow, `nullok`, hashing, AppArmor, chrony user) proved to be false positives when verified live.
 
 Lessons:
 - **Only set the destination port** in firewall rules — a populated source port (ephemeral) matches nothing and locks you out.
 - When adding a guest firewall, include your **monitoring host** — dropped (not refused) probes make Uptime Kuma's backend stall until they time out.
 - Run diagnostics against firewalled guests **from an allowed source**, not from a node.
+- **Service keys are least-privilege:** every automation key in `authorized_keys` carries `from="<client IP>"`, `restrict` and a forced command (`rrsync -ro <dir>` for rsync pulls, a fixed script for certificate distribution). `rrsync` prefixes its directory onto requested paths, so clients use relative paths.
 - Credentials live in a password manager; on-disk secrets are root-only files (`chmod 600`/`640`), never in compose files or unit files.
 
 Open items: retire `root@pam` for daily use; push Tailscale ACLs; tighten services still listening on all interfaces (mostly SSH in containers).
@@ -302,7 +319,7 @@ Open items: retire `root@pam` for daily use; push Tailscale ACLs; tighten servic
 
 ### Patching
 
-A cluster-wide updater runs from cron on one node and snapshots guests before updating. Schedule it **clear of the nightly backup window**. Docker-based guests need `docker compose pull` separately.
+A cluster-wide updater runs from cron on one node and snapshots guests before updating. Schedule it **clear of the nightly backup window**. Docker-based guests need `docker compose pull` separately. The monitoring Pi sits outside the updater and uses `unattended-upgrades` (Debian, Debian-Security and Raspberry Pi origins; SIEM agent blacklisted; Docker excluded; no automatic reboot). **Wazuh packages are version-held everywhere** and upgraded deliberately, manager first.
 
 ### Memory management on ZFS hosts
 
@@ -313,7 +330,7 @@ A cluster-wide updater runs from cron on one node and snapshots guests before up
 | Databases | `swap 0` on the container — otherwise the host can push the buffer pool to swap |
 | Rule of thumb | Sum of guest RAM limits + ARC cap ≤ host RAM |
 
-A 4-core, 32 GB node was swapping 4.8 GB with ~30 GB of guest limits plus a 10 GB ARC cap; capping ARC at 6 GB, right-sizing the Home Assistant VM and lowering swappiness freed ~8 GB and cleared host swap.
+A 4-core, 32 GB node was swapping 4.8 GB with ~30 GB of guest limits plus a 10 GB ARC cap; capping ARC at 6 GB, right-sizing the Home Assistant VM and lowering swappiness freed ~8 GB and cleared host swap. A VM with ballooning disabled (the SIEM) shows ~100 % memory in the PVE summary — that is guest page cache; judge it from `free -m` inside the guest.
 
 ### HA operations
 
@@ -335,11 +352,12 @@ PVE 9 constraint: a **positive resource-affinity** rule cannot be combined with 
 
 - **Privileged → unprivileged:** stop-mode vzdump → `pct restore --unprivileged 1 --ignore-unpack-errors 1` → strip raw `lxc.` device lines, fresh MAC and temporary IP, `nesting=1` → mask `sys-kernel-config.mount`, disable `systemd-networkd-wait-online` → validate → cut over → keep the original through a soak week.
 - **Digest-pinned compose update:** back up the compose file, pull by *service* name, watch logs, re-pin the digest.
+- **Interrupted `apt` over a remote session:** if package scripts restart the service carrying your session, dpkg dies half-configured. Recover detached: `systemd-run --unit=dpkg-recover -p RemainAfterExit=yes --setenv=DEBIAN_FRONTEND=noninteractive dpkg --force-confdef --force-confold --configure -a`; never reboot while firmware or initramfs steps are running.
 - **Inventory export:** a read-only per-node script (Appendix A) that captures configs, storage, networking, HA, firewall and schedules with credential redaction.
 
 ### Notifications
 
-All backup, replication and HA events go through the Proxmox notification system to an SMTP target. Weekly "backup OK" mails are kept as a heartbeat — silence is a signal.
+All backup, replication and HA events go through the Proxmox notification system to an SMTP target. Weekly "backup OK" mails are kept as a heartbeat — silence is a signal. SIEM alerts (level ≥12) reach email through a loopback-only Postfix relay on the SIEM VM.
 
 ---
 
@@ -347,7 +365,10 @@ All backup, replication and HA events go through the Proxmox notification system
 
 | Date | Change |
 |---|---|
-| Oct 2026 | Nextcloud rebuilt from a TurnKey VM to HA LXCs (app, DB, two tunnel connectors) with replication to the compute node; zero router forwards; split DNS removed; per-guest firewalls; nightly DB dump to off-site; memory rebalanced on the busiest node; cluster config cleaned (duplicate migration line and a pasted document found in `datacenter.cfg`); full inventory re-baseline (this v3.0) |
+| 18 Oct 2026 | SIEM first-week tuning (~180k alerts/week, three-quarters cluster-internal SSH): LXC rootcheck, Pi-hole/LVM/updater FIM and guest-NIC promiscuous-mode noise suppressed; internal root SSH silenced by source. The review exposed an **unrestricted NAS service key** — now `from=` + `restrict` + `rrsync -ro`, with the client moved to a static IP — and a forgotten pre-tunnel nginx serving a certificate expired for four months. Pattern now standard: every service key gets a source pin, `restrict` and a forced command. This v3.2 |
+| 12 Oct 2026 | **Wazuh completed:** email alerting, control-plane FIM with whodata, auditd on the nodes, CIS/SCA pass (sshd hardening, cron permissions, telnet removed), agents on ~all guests (30 active). First high alerts traced to Plex loudness analysis OOM-looping on a 59 GB multi-track REMUX against its 4 GiB cgroup — duplicate file removed. **Monitoring Pi recovered:** 141 pending updates (27 critical CVEs) applied and `unattended-upgrades` enabled; a systemd ordering cycle (`After=` the target that wants the unit) fixed; the real fault — the LTE modem dying on every soft reboot — traced via the HAT schematic to the power-key pulse being sent to the wrong GPIO and the reset line floating asserted; SSH disabled; persistent journal. This v3.1 |
+| 11 Oct 2026 | Wazuh SIEM VM built (replacing a test container); memory rebalanced on two nodes; privilege audit (all containers unprivileged); explicit guest start order; pve3 backups mirrored to a second pool; SMART alerting via Kuma push |
+| 8–9 Oct 2026 | Nextcloud rebuilt from a TurnKey VM to HA LXCs (app, DB, two tunnel connectors) with replication to the compute node; zero router forwards; split DNS removed; per-guest firewalls; nightly DB dump to off-site; cluster config cleaned (duplicate migration line and a pasted document found in `datacenter.cfg`); full inventory re-baseline (v3.0) |
 | Aug 2026 | Ebook stack rebuilt: root-run timer had left container-uid-0 files under a correctly owned mount root; migrated to Calibre-Web NextGen (self-healing ownership) |
 | Jul 2026 | Third node joined (two corosync links; QDevice retired); Plex moved to an unprivileged container on the A310 with NFS media; pve3 backups over NFS; SMTP notifications; HA for Vaultwarden and Home Assistant; *arr stack, Tailscale router, Vaultwarden, Audiobookshelf; Windows 11 VM; LLM services moved onto the cluster |
 | Jun 2026 | Off-site and cross-node backup layers (sanoid, syncoid, dump-mirror, restic); Proxmox UI removed from the internet (Tailscale, datacenter firewall, TOTP); Euro-Office deployed |
@@ -359,7 +380,7 @@ Full narrative history is kept in the internal counterpart.
 
 ## 10. Explain like I'm 5
 
-Three big toy boxes keep talking to each other so that if one falls asleep, the other two still know what's going on. The family cloud lives in three small lunchboxes on the middle toy box — one shows your files, one remembers where everything is, one answers the door — and every five minutes they're copied to the fast toy box next door, so if the lights go out they can be opened there instead. Nobody walks in from the street: every visitor checks in at the Cloudflare reception desk. Every night the important books are copied to the other toy box and, in a locked safe, to a storage room far away.
+Three big toy boxes keep talking to each other so that if one falls asleep, the other two still know what's going on. The family cloud lives in three small lunchboxes on the middle toy box — one shows your files, one remembers where everything is, one answers the door — and every five minutes they're copied to the fast toy box next door, so if the lights go out they can be opened there instead. Nobody walks in from the street: every visitor checks in at the Cloudflare reception desk. Every night the important books are copied to the other toy box and, in a locked safe, to a storage room far away. A watchman in the corner (Wazuh) now writes down who touches the important locks, and the little lookout outside (the Pi) can text for help even when the house's phone line is down — once we found which wire actually wakes its phone up.
 
 ---
 
@@ -367,6 +388,7 @@ Three big toy boxes keep talking to each other so that if one falls asleep, the 
 
 - Proxmox VE — [Administration Guide](https://pve.proxmox.com/pve-docs/pve-admin-guide.html) · [High Availability](https://pve.proxmox.com/wiki/High_Availability) · [Storage Replication](https://pve.proxmox.com/wiki/Storage_Replication) · [Cluster Manager](https://pve.proxmox.com/wiki/Cluster_Manager) · [Backup and Restore](https://pve.proxmox.com/wiki/Backup_and_Restore) · [Firewall](https://pve.proxmox.com/wiki/Firewall) · [Unprivileged LXC](https://pve.proxmox.com/wiki/Unprivileged_LXC_containers)
 - Cloudflare — [Tunnel availability and replicas](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/deploy-tunnels/tunnel-availability/) · [WAF custom rules](https://developers.cloudflare.com/waf/custom-rules/)
+- [Wazuh documentation](https://documentation.wazuh.com/current/) (installation guide, centralised configuration, FIM whodata, email alerts with an SMTP relay, SCA)
 - [OpenZFS documentation](https://openzfs.github.io/openzfs-docs/) · [sanoid / syncoid](https://github.com/jimsalterjrs/sanoid) · [restic](https://restic.readthedocs.io/) · [Tailscale](https://tailscale.com/kb/)
 - [Nextcloud admin manual](https://docs.nextcloud.com/server/latest/admin_manual/) · [Intel media-driver](https://github.com/intel/media-driver) · [Community Scripts](https://community-scripts.github.io/ProxmoxVE/)
 
@@ -388,6 +410,8 @@ A read-only bash script run as root on each node, writing a mode-600 report with
 | ARC size | `awk '/^size/{printf "%.1f GiB\n",$3/2^30}' /proc/spl/kstat/zfs/arcstats` |
 | Numeric ownership | `ls -ln <path>` |
 | Dataset snapshot | `zfs snapshot tank/<dataset>@<tag>` |
+| SIEM agent count | `/var/ossec/bin/agent_control -l \| grep -c Active` (on the manager) |
+| systemd ordering cycles | `journalctl -b \| grep -i 'ordering cycle'` |
 
 ### Appendix C — Glossary
 
@@ -399,7 +423,9 @@ A read-only bash script run as root on each node, writing a mode-600 report with
 | ARC | ZFS in-RAM read cache |
 | Unprivileged container | LXC with a uid shift (container root ≠ host root) |
 | Tunnel connector | `cloudflared` process forwarding Cloudflare traffic to LAN origins |
+| FIM / whodata | File-integrity monitoring; whodata adds the user and process behind each change (via auditd) |
+| SCA | Wazuh Security Configuration Assessment (CIS benchmark checks) |
 
 ---
 
-*End of document (v3.0, October 2026). Maintain via PR/commit; keep aligned with the internal counterpart.*
+*End of document (v3.2, October 2026). Maintain via PR/commit; keep aligned with the internal counterpart.*
